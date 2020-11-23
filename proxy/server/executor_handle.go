@@ -71,12 +71,11 @@ func (se *SessionExecutor) handleQuery(sql string) (r *mysql.Result, err error) 
 	}
 
 	startTime := time.Now()
-
 	stmtType := parser.Preview(sql)
 	reqCtx.Set(util.StmtType, stmtType)
 
 	r, err = se.doQuery(reqCtx, sql)
-	se.manager.RecordSessionSQLMetrics(reqCtx, se.namespace, sql, startTime, err)
+	se.manager.RecordSessionSQLMetrics(reqCtx, se, sql, startTime, err)
 	return r, err
 }
 
@@ -172,8 +171,12 @@ func (se *SessionExecutor) handleShow(reqCtx *util.RequestContext, sql string, s
 	switch stmt.Tp {
 	case ast.ShowDatabases:
 		dbs := se.GetNamespace().GetAllowedDBs()
-		r := createShowDatabaseResult(dbs)
-		return r, nil
+		return createShowDatabaseResult(dbs), nil
+	case ast.ShowVariables:
+		if strings.Contains(sql, gaeaGeneralLogVariable) {
+			return createShowGeneralLogResult(), nil
+		}
+		fallthrough
 	default:
 		r, err := se.ExecuteSQL(reqCtx, backend.DefaultSlice, se.db, sql)
 		if err != nil {
@@ -281,16 +284,22 @@ func (se *SessionExecutor) handleSetVariable(v *ast.VariableAssignment) error {
 		return nil
 	case "sql_select_limit":
 		return nil
-
 		// unsupported
 	case "transaction":
 		return fmt.Errorf("does not support set transaction in gaea")
+	case gaeaGeneralLogVariable:
+		value := getVariableExprResult(v.Value)
+		onOffValue, err := getOnOffVariable(value)
+		if err != nil {
+			return mysql.NewDefaultError(mysql.ErrWrongValueForVar, name, value)
+		}
+		return se.setGeneralLogVariable(onOffValue)
 	default:
 		return nil
 	}
 }
 
-func (se *SessionExecutor) handleSetAutoCommit(autocommit bool) error {
+func (se *SessionExecutor) handleSetAutoCommit(autocommit bool) (err error) {
 	se.txLock.Lock()
 	defer se.txLock.Unlock()
 
@@ -301,18 +310,16 @@ func (se *SessionExecutor) handleSetAutoCommit(autocommit bool) error {
 		}
 		for _, pc := range se.txConns {
 			if e := pc.SetAutoCommit(1); e != nil {
-				pc.Recycle()
-				se.txConns = make(map[string]*backend.PooledConnection)
-				return fmt.Errorf("set autocommit error, %v", e)
+				err = fmt.Errorf("set autocommit error, %v", e)
 			}
 			pc.Recycle()
 		}
 		se.txConns = make(map[string]*backend.PooledConnection)
-		return nil
+		return
 	}
 
 	se.status &= ^mysql.ServerStatusAutocommit
-	return nil
+	return
 }
 
 func (se *SessionExecutor) handleStmtPrepare(sql string) (*Stmt, error) {

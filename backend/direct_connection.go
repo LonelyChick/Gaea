@@ -529,26 +529,21 @@ func (dc *DirectConnection) FieldList(table string, wildcard string) ([]*mysql.F
 	if err := dc.writeComFieldList(table, wildcard); err != nil {
 		return nil, err
 	}
-
-	data, err := dc.readPacket()
-	if err != nil {
-		return nil, err
-	}
-
 	fs := make([]*mysql.Field, 0, 4)
 	var f *mysql.Field
-	if data[0] == mysql.ErrHeader {
-		return nil, dc.handleErrorPacket(data)
-	}
-
 	for {
-		if data, err = dc.readPacket(); err != nil {
+		data, err := dc.readPacket()
+		if err != nil {
 			return nil, err
 		}
 
 		// EOF Packet
 		if dc.isEOFPacket(data) {
 			return fs, nil
+		}
+
+		if data[0] == mysql.ErrHeader {
+			return nil, dc.handleErrorPacket(data)
 		}
 
 		if f, err = mysql.FieldData(data).Parse(); err != nil {
@@ -626,6 +621,10 @@ func (dc *DirectConnection) readResultColumns(result *mysql.Result) (err error) 
 			return
 		}
 
+		if data[0] == mysql.ErrHeader {
+			return dc.handleErrorPacket(data)
+		}
+
 		result.Fields[i], err = mysql.FieldData(data).Parse()
 		if err != nil {
 			return
@@ -643,7 +642,6 @@ func (dc *DirectConnection) readResultRows(result *mysql.Result, isBinary bool) 
 
 	for {
 		data, err = dc.readPacket()
-
 		if err != nil {
 			return
 		}
@@ -658,6 +656,10 @@ func (dc *DirectConnection) readResultRows(result *mysql.Result, isBinary bool) 
 			}
 
 			break
+		}
+
+		if data[0] == mysql.ErrHeader {
+			return dc.handleErrorPacket(data)
 		}
 
 		result.RowDatas = append(result.RowDatas, data)
